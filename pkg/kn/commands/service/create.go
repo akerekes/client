@@ -17,20 +17,15 @@ package service
 import (
 	"errors"
 	"fmt"
-	"io"
 
 	"knative.dev/client/pkg/kn/commands"
+	servicelib "knative.dev/client/pkg/kn/lib/service"
 	servinglib "knative.dev/client/pkg/serving"
-
-	"knative.dev/serving/pkg/apis/serving"
 
 	"github.com/spf13/cobra"
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	servingv1 "knative.dev/serving/pkg/apis/serving/v1"
-
-	clientservingv1 "knative.dev/client/pkg/serving/v1"
 )
 
 var create_example = `
@@ -90,7 +85,7 @@ func NewServiceCreateCommand(p *commands.KnParams) *cobra.Command {
 				return err
 			}
 
-			serviceExists, err := serviceExists(client, name)
+			serviceExists, err := servicelib.ServiceExists(client, name)
 			if err != nil {
 				return err
 			}
@@ -102,9 +97,9 @@ func NewServiceCreateCommand(p *commands.KnParams) *cobra.Command {
 						"cannot create service '%s' in namespace '%s' "+
 							"because the service already exists and no --force option was given", name, namespace)
 				}
-				err = replaceService(client, service, waitFlags, out)
+				err = servicelib.ReplaceService(client, service, waitFlags, out)
 			} else {
-				err = createService(client, service, waitFlags, out)
+				err = servicelib.CreateService(client, service, waitFlags, out)
 			}
 			if err != nil {
 				return err
@@ -116,113 +111,6 @@ func NewServiceCreateCommand(p *commands.KnParams) *cobra.Command {
 	editFlags.AddCreateFlags(serviceCreateCommand)
 	waitFlags.AddConditionWaitFlags(serviceCreateCommand, commands.WaitDefaultTimeout, "Create", "service")
 	return serviceCreateCommand
-}
-
-func createService(client clientservingv1.KnServingClient, service *servingv1.Service, waitFlags commands.WaitFlags, out io.Writer) error {
-	err := client.CreateService(service)
-	if err != nil {
-		return err
-	}
-
-	return waitIfRequested(client, service, waitFlags, "Creating", "created", out)
-}
-
-func replaceService(client clientservingv1.KnServingClient, service *servingv1.Service, waitFlags commands.WaitFlags, out io.Writer) error {
-	err := prepareAndUpdateService(client, service)
-	if err != nil {
-		return err
-	}
-	return waitIfRequested(client, service, waitFlags, "Replacing", "replaced", out)
-}
-
-func waitIfRequested(client clientservingv1.KnServingClient, service *servingv1.Service, waitFlags commands.WaitFlags, verbDoing string, verbDone string, out io.Writer) error {
-	//TODO: deprecated condition should be removed with --async flag
-	if waitFlags.Async {
-		fmt.Fprintf(out, "\nWARNING: flag --async is deprecated and going to be removed in future release, please use --no-wait instead.\n\n")
-		fmt.Fprintf(out, "Service '%s' %s in namespace '%s'.\n", service.Name, verbDone, client.Namespace())
-		return nil
-	}
-	if waitFlags.NoWait {
-		fmt.Fprintf(out, "Service '%s' %s in namespace '%s'.\n", service.Name, verbDone, client.Namespace())
-		return nil
-	}
-
-	fmt.Fprintf(out, "%s service '%s' in namespace '%s':\n", verbDoing, service.Name, client.Namespace())
-	return waitForServiceToGetReady(client, service.Name, waitFlags.TimeoutInSeconds, verbDone, out)
-}
-
-func prepareAndUpdateService(client clientservingv1.KnServingClient, service *servingv1.Service) error {
-	var retries = 0
-	for {
-		existingService, err := client.GetService(service.Name)
-		if err != nil {
-			return err
-		}
-
-		// Copy over some annotations that we want to keep around. Erase others
-		copyList := []string{
-			serving.CreatorAnnotation,
-			serving.UpdaterAnnotation,
-		}
-
-		// If the target Annotation doesn't exist, create it even if
-		// we don't end up copying anything over so that we erase all
-		// existing annotations
-		if service.Annotations == nil {
-			service.Annotations = map[string]string{}
-		}
-
-		// Do the actual copy now, but only if it's in the source annotation
-		for _, k := range copyList {
-			if v, ok := existingService.Annotations[k]; ok {
-				service.Annotations[k] = v
-			}
-		}
-
-		service.ResourceVersion = existingService.ResourceVersion
-		err = client.UpdateService(service)
-		if err != nil {
-			// Retry to update when a resource version conflict exists
-			if apierrors.IsConflict(err) && retries < MaxUpdateRetries {
-				retries++
-				continue
-			}
-			return err
-		}
-		return nil
-	}
-}
-
-func waitForServiceToGetReady(client clientservingv1.KnServingClient, name string, timeout int, verbDone string, out io.Writer) error {
-	fmt.Fprintln(out, "")
-	err := waitForService(client, name, out, timeout)
-	if err != nil {
-		return err
-	}
-	fmt.Fprintln(out, "")
-	return showUrl(client, name, "", verbDone, out)
-}
-
-// Duck type for writers having a flush
-type flusher interface {
-	Flush() error
-}
-
-func flush(out io.Writer) {
-	if flusher, ok := out.(flusher); ok {
-		flusher.Flush()
-	}
-}
-
-func serviceExists(client clientservingv1.KnServingClient, name string) (bool, error) {
-	_, err := client.GetService(name)
-	if apierrors.IsNotFound(err) {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	return true, nil
 }
 
 // Create service struct from provided options
